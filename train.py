@@ -1,4 +1,6 @@
 #! /usr/bin/env python
+import sys
+# sys.stdout = open('console_log.txt', 'w+', buffering=1)
 
 import argparse
 import os
@@ -13,8 +15,18 @@ from keras.optimizers import Adam
 from callbacks import CustomModelCheckpoint, CustomTensorBoard
 from utils.multi_gpu_model import multi_gpu_model
 import tensorflow as tf
-import keras
 from keras.models import load_model
+from datetime import datetime
+
+
+#################
+# from tensorflow.compat.v1 import ConfigProto
+# from tensorflow.compat.v1 import InteractiveSession
+#
+# config = ConfigProto()
+# config.gpu_options.allow_growth = True
+# session = InteractiveSession(config=config)
+###########################
 
 def create_training_instances(
     train_annot_folder,
@@ -62,8 +74,9 @@ def create_training_instances(
 
     return train_ints, valid_ints, sorted(labels), max_box_per_image
 
-def create_callbacks(saved_weights_name, tensorboard_logs, model_to_save):
-    makedirs(tensorboard_logs)
+
+def create_callbacks(model_log, tensorboard_logs, model_to_save):
+    makedirs(model_log)
     
     early_stop = EarlyStopping(
         monitor     = 'loss', 
@@ -74,7 +87,7 @@ def create_callbacks(saved_weights_name, tensorboard_logs, model_to_save):
     )
     checkpoint = CustomModelCheckpoint(
         model_to_save   = model_to_save,
-        filepath        = saved_weights_name,# + '{epoch:02d}.h5', 
+        filepath        = model_log + 'ep{epoch:03d}-loss{loss:.3f}.h5',
         monitor         = 'loss', 
         verbose         = 1, 
         save_best_only  = True, 
@@ -92,11 +105,12 @@ def create_callbacks(saved_weights_name, tensorboard_logs, model_to_save):
         min_lr   = 0
     )
     tensorboard = CustomTensorBoard(
-        log_dir                = tensorboard_logs,
+        log_dir                = model_log,
         write_graph            = True,
         write_images           = True,
     )    
     return [early_stop, checkpoint, reduce_on_plateau, tensorboard]
+
 
 def create_model(
     nb_class, 
@@ -148,9 +162,10 @@ def create_model(
 
     # load the pretrained weight if exists, otherwise load the backend weight only
     if os.path.exists(saved_weights_name): 
-        print("\nLoading pretrained weights.\n")
+        print("\nLoading pretrained Weights.\n")
         template_model.load_weights(saved_weights_name)
     else:
+        print("\nLoading Trasferred Weights.\n")
         template_model.load_weights("backend.h5", by_name=True)       
 
     if multi_gpu > 1:
@@ -164,10 +179,15 @@ def create_model(
     return train_model, infer_model
 
 def _main_(args):
-    config_path = args.conf
 
+    config_path = args.conf
     with open(config_path) as config_buffer:    
         config = json.loads(config_buffer.read())
+
+    model_log_dir = config['train']['tensorboard_dir'] + 'training_yolo_v3_{}/'.format(datetime.now().strftime('%Y-%m-%d--%H-%M-%S'))
+    makedirs(model_log_dir)
+    sys.stdout = open(model_log_dir + 'console_log.txt', 'w+', buffering=1)
+
 
     ###############################
     #   Parse the annotations 
@@ -187,7 +207,7 @@ def _main_(args):
     #   Create the generators 
     ###############################    
     train_generator = BatchGenerator(
-        instances           = train_ints, 
+        instances           = train_ints,
         anchors             = config['model']['anchors'],   
         labels              = labels,        
         downsample          = 32, # ratio between network input's size and network output's size, 32 for YOLOv3
@@ -201,7 +221,7 @@ def _main_(args):
     )
     
     valid_generator = BatchGenerator(
-        instances           = valid_ints, 
+        instances           = valid_ints,
         anchors             = config['model']['anchors'],   
         labels              = labels,        
         downsample          = 32, # ratio between network input's size and network output's size, 32 for YOLOv3
@@ -245,7 +265,7 @@ def _main_(args):
     ###############################
     #   Kick off the training
     ###############################
-    callbacks = create_callbacks(config['train']['saved_weights_name'], config['train']['tensorboard_dir'], infer_model)
+    callbacks = create_callbacks(model_log_dir, config['train']['tensorboard_dir'], infer_model)
 
     train_model.fit_generator(
         generator        = train_generator, 
@@ -254,7 +274,7 @@ def _main_(args):
         verbose          = 2 if config['train']['debug'] else 1,
         callbacks        = callbacks, 
         workers          = 4,
-        max_queue_size   = 8
+        # max_queue_size   = 8
     )
 
     # make a GPU version of infer_model for evaluation
@@ -272,9 +292,12 @@ def _main_(args):
         print(labels[label] + ': {:.4f}'.format(average_precision))
     print('mAP: {:.4f}'.format(sum(average_precisions.values()) / len(average_precisions)))           
 
+
 if __name__ == '__main__':
     argparser = argparse.ArgumentParser(description='train and evaluate YOLO_v3 model on any dataset')
-    argparser.add_argument('-c', '--conf', help='path to configuration file')   
+    argparser.add_argument('-c', '--conf', help='path to configuration file',
+                           default="config.json")
 
     args = argparser.parse_args()
     _main_(args)
+
